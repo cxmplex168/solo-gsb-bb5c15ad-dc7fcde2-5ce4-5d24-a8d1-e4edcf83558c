@@ -61,6 +61,20 @@ const dvFormula = document.getElementById('dvFormula');
 const dvSummary = document.getElementById('dvSummary');
 const dvTableBody = document.querySelector('#dvTable tbody');
 const dvTableFoot = document.querySelector('#dvTable tfoot');
+const stockBatchesBox = document.getElementById('stockBatchesEnabled');
+const batchEditor = document.getElementById('batchEditor');
+const batchRowsBox = document.getElementById('batchRows');
+const addBatchBtn = document.getElementById('addBatchBtn');
+const batchCountHint = document.getElementById('batchCountHint');
+const stockBatchCard = document.getElementById('stockBatchCard');
+const batchFormula = document.getElementById('batchFormula');
+const batchGapBox = document.getElementById('batchGap');
+const batchSummary = document.getElementById('batchSummary');
+const batchSigTableBody = document.querySelector('#batchSigTable tbody');
+const batchSigTableFoot = document.querySelector('#batchSigTable tfoot');
+const batchLotTableBody = document.querySelector('#batchLotTable tbody');
+const batchLotTableFoot = document.querySelector('#batchLotTable tfoot');
+const MAX_BATCH_ROWS = 12;
 const MAX_QUOTE_ROWS = 8;
 const obsForm = document.getElementById('obsForm');
 const obsSignature = document.getElementById('obsSignature');
@@ -241,6 +255,88 @@ quoteManualDemandBox.addEventListener('change', () => {
 });
 syncPurchaseQuotesUI();
 
+/* ------------------------------ 库存批次领纸 ------------------------------ */
+
+/** 渲染一条批次录入行（字段顺序即录入顺序，服务端按此序号给出批次编号）。 */
+function addBatchRow(initial) {
+  const row = document.createElement('div');
+  row.className = 'batch-row';
+  const values = initial || { lot: '', availableSheets: '', allowedSignatures: '' };
+  row.innerHTML = `
+    <input class="b-lot" type="text" maxlength="50" placeholder="如 A01" value="${escapeAttr(values.lot)}">
+    <input class="b-sheets" type="number" min="1" max="100000000" step="1" placeholder="如 5000" value="${escapeAttr(values.availableSheets)}">
+    <input class="b-sigs" type="text" placeholder="留空 = 通用批，如 1, 3" value="${escapeAttr(values.allowedSignatures)}">
+    <button type="button" class="ghost small-btn b-del">删除</button>
+  `;
+  row.querySelector('.b-del').addEventListener('click', () => {
+    row.remove();
+    updateBatchCountHint();
+  });
+  batchRowsBox.appendChild(row);
+  updateBatchCountHint();
+}
+
+function updateBatchCountHint() {
+  batchCountHint.textContent = `已录入 ${batchRowsBox.children.length} / ${MAX_BATCH_ROWS} 个批次`;
+  addBatchBtn.disabled = batchRowsBox.children.length >= MAX_BATCH_ROWS;
+}
+
+addBatchBtn.addEventListener('click', () => addBatchRow());
+
+/** 批次区块启用状态与可编辑性同步；启用时默认给两行便于录入。 */
+function syncStockBatchesUI() {
+  const on = stockBatchesBox.checked;
+  batchEditor.hidden = !on;
+  if (on && batchRowsBox.children.length === 0) {
+    addBatchRow();
+    addBatchRow();
+  }
+}
+stockBatchesBox.addEventListener('change', syncStockBatchesUI);
+syncStockBatchesUI();
+
+/**
+ * 收集并校验批次录入；返回 { batches } 或抛出带明确信息的 Error。
+ * 允许帖号留空（通用批）时不上送 allowedSignatures；无法解析的帖号 token
+ * 原样上送，由服务端给出明确错误（与章节起始页同一处理原则）。
+ */
+function collectStockBatches() {
+  const rows = [...batchRowsBox.querySelectorAll('.batch-row')];
+  if (rows.length === 0) {
+    throw new Error('库存批次领纸至少录入 1 个批次');
+  }
+  if (rows.length > MAX_BATCH_ROWS) {
+    throw new Error(`库存批次最多录入 ${MAX_BATCH_ROWS} 个`);
+  }
+  const batches = [];
+  const lots = new Set();
+  rows.forEach((row, i) => {
+    const where = `第 ${i + 1} 个批次`;
+    const lot = row.querySelector('.b-lot').value.trim();
+    if (!lot) throw new Error(`${where}：批号不能为空`);
+    if (lots.has(lot)) throw new Error(`${where}：批号与前面重复（「${lot}」）`);
+    lots.add(lot);
+    const availableSheets = Number(row.querySelector('.b-sheets').value);
+    if (!Number.isInteger(availableSheets) || availableSheets < 1) {
+      throw new Error(`${where}（批号「${lot}」）：可用张数必须为 ≥ 1 的整数`);
+    }
+    const sigRaw = row.querySelector('.b-sigs').value.trim();
+    if (sigRaw === '') {
+      batches.push({ lot, availableSheets }); // 通用批：不上送 allowedSignatures
+    } else {
+      const allowedSignatures = sigRaw
+        .split(/[,，、;；\s]+/)
+        .filter(Boolean)
+        .map((token) => {
+          const n = Number(token);
+          return Number.isInteger(n) ? n : token;
+        });
+      batches.push({ lot, availableSheets, allowedSignatures });
+    }
+  });
+  return { batches };
+}
+
 /** 解析章节起始页输入：支持逗号 / 顿号 / 分号 / 空白分隔；无法解析的 token 原样上送，由服务端给出明确错误。 */
 function parseChapterStarts(raw) {
   return raw
@@ -306,57 +402,63 @@ form.addEventListener('submit', async (event) => {
   event.preventDefault();
   errorBox.hidden = true;
 
-  const chapterSplit = chapterSplitBox.checked;
-  const payload = {
-    totalPages: Number(document.getElementById('totalPages').value),
-    sheetsPerSignature: Number(document.getElementById('sheetsPerSignature').value),
-    balancedSplit: balancedSplitBox.checked,
-    chapterSplit,
-    chapterStarts: chapterSplit ? parseChapterStarts(chapterStartsInput.value) : [],
-    binding: document.getElementById('binding').value,
-    flip: document.getElementById('flip').value,
-    paperThickness: Number(document.getElementById('paperThickness').value),
-    maxCompensation: Number(document.getElementById('maxCompensation').value),
-    paperWidth: Number(document.getElementById('paperWidth').value),
-    paperHeight: Number(document.getElementById('paperHeight').value),
-    pageWidth: Number(document.getElementById('pageWidth').value),
-    pageHeight: Number(document.getElementById('pageHeight').value),
-    bleedMm: Number(document.getElementById('bleedMm').value),
-    safetyMm: Number(document.getElementById('safetyMm').value),
-    productionMarks: productionMarksBox.checked,
-    // 仅勾选启用时上送尺寸；留空 / 未勾选时由服务端取缺省（不参与未启用流程）
-    markSizeMm: productionMarksBox.checked && markSizeInput.value.trim() !== ''
-      ? Number(markSizeInput.value)
-      : undefined,
-    // 印刷备料：仅勾选时上送；过程损耗率百分数换算为小数（3% -> 0.03）
-    materialPrep: materialPrepBox.checked
-      ? {
-          copies: Number(prepCopiesInput.value),
-          makereadySheets: Number(prepMakereadyInput.value),
-          processWasteRate: Number(prepWasteRateInput.value) / 100,
-          sheetsPerPack: Number(prepSheetsPerPackInput.value),
-        }
-      : undefined,
-    // 采购报价组合：仅勾选时上送；价格在收集阶段已精确换算为整数分。
-    // demandSheets 未手工填写时不上送，由服务端回退到备料整包采购张数。
-    purchaseQuotes: (() => {
-      if (!purchaseQuotesBox.checked) return undefined;
-      const { quotes, demandSheets } = collectPurchaseQuotes();
-      return { demandSheets, quotes };
-    })(),
-    // 双版本共版印刷：仅勾选时上送；改动页码在前端做轻量分词，完整校验由服务端执行
-    dualVersion: dualVersionBox.checked
-      ? {
-          copiesA: Number(dvCopiesAInput.value),
-          copiesB: Number(dvCopiesBInput.value),
-          changedPages: parseChangedPagesInput(dvChangedPagesInput.value),
-        }
-      : undefined,
-  };
-  // 已录入观察时随生成一并核验；无观察时请求体与原流程完全一致
-  const requestBody = state.observations.length ? { ...payload, observations: observationPayload() } : payload;
-
   try {
+    const chapterSplit = chapterSplitBox.checked;
+    const payload = {
+      totalPages: Number(document.getElementById('totalPages').value),
+      sheetsPerSignature: Number(document.getElementById('sheetsPerSignature').value),
+      balancedSplit: balancedSplitBox.checked,
+      chapterSplit,
+      chapterStarts: chapterSplit ? parseChapterStarts(chapterStartsInput.value) : [],
+      binding: document.getElementById('binding').value,
+      flip: document.getElementById('flip').value,
+      paperThickness: Number(document.getElementById('paperThickness').value),
+      maxCompensation: Number(document.getElementById('maxCompensation').value),
+      paperWidth: Number(document.getElementById('paperWidth').value),
+      paperHeight: Number(document.getElementById('paperHeight').value),
+      pageWidth: Number(document.getElementById('pageWidth').value),
+      pageHeight: Number(document.getElementById('pageHeight').value),
+      bleedMm: Number(document.getElementById('bleedMm').value),
+      safetyMm: Number(document.getElementById('safetyMm').value),
+      productionMarks: productionMarksBox.checked,
+      // 仅勾选启用时上送尺寸；留空 / 未勾选时由服务端取缺省（不参与未启用流程）
+      markSizeMm: productionMarksBox.checked && markSizeInput.value.trim() !== ''
+        ? Number(markSizeInput.value)
+        : undefined,
+      // 印刷备料：仅勾选时上送；过程损耗率百分数换算为小数（3% -> 0.03）
+      materialPrep: materialPrepBox.checked
+        ? {
+            copies: Number(prepCopiesInput.value),
+            makereadySheets: Number(prepMakereadyInput.value),
+            processWasteRate: Number(prepWasteRateInput.value) / 100,
+            sheetsPerPack: Number(prepSheetsPerPackInput.value),
+          }
+        : undefined,
+      // 采购报价组合：仅勾选时上送；价格在收集阶段已精确换算为整数分。
+      // demandSheets 未手工填写时不上送，由服务端回退到备料整包采购张数。
+      purchaseQuotes: (() => {
+        if (!purchaseQuotesBox.checked) return undefined;
+        const { quotes, demandSheets } = collectPurchaseQuotes();
+        return { demandSheets, quotes };
+      })(),
+      // 双版本共版印刷：仅勾选时上送；改动页码在前端做轻量分词，完整校验由服务端执行
+      dualVersion: dualVersionBox.checked
+        ? {
+            copiesA: Number(dvCopiesAInput.value),
+            copiesB: Number(dvCopiesBInput.value),
+            changedPages: parseChangedPagesInput(dvChangedPagesInput.value),
+          }
+        : undefined,
+      // 库存批次领纸：仅勾选时上送；需先启用印刷备料（未启用时服务端返回明确错误）。
+      // 允许帖号留空 = 通用批（不上送 allowedSignatures）。
+      stockBatches: (() => {
+        if (!stockBatchesBox.checked) return undefined;
+        return collectStockBatches();
+      })(),
+    };
+    // 已录入观察时随生成一并核验；无观察时请求体与原流程完全一致
+    const requestBody = state.observations.length ? { ...payload, observations: observationPayload() } : payload;
+
     const resp = await fetch('/api/impose', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -425,6 +527,7 @@ function renderAll() {
   renderMaterialPrep();
   renderPurchaseQuotes();
   renderDualVersion();
+  renderStockBatches();
   jsonPreview.textContent = JSON.stringify(state.result, null, 2);
   renderObsPanel();
   draw();
@@ -538,6 +641,14 @@ function renderSummary() {
       text: `双版本共版：印版 ${t.plateCount} 块（共版 ${t.sharedSideCount} 面 · 拆版 ${t.splitSideCount} 面）· 总印次 ${formatSheets(t.impressions)}`,
       cls: 'quote-ok',
     });
+  }
+  if (r.stockBatches && r.stockBatches.enabled) {
+    const t = r.stockBatches.totals;
+    chips.push(
+      t.fullyCovered
+        ? { text: `库存批次领纸：${t.batchCount} 批领用 ${formatSheets(t.drawnSheets)} 张，各帖均无缺口`, cls: 'prep-ok' }
+        : { text: `库存批次领纸：领用 ${formatSheets(t.drawnSheets)} 张 · 总缺口 ${formatSheets(t.gapSheets)} 张`, cls: 'quote-fail' }
+    );
   }
   summaryBox.innerHTML = '';
   chips.forEach(({ text, cls }) => {
@@ -946,6 +1057,127 @@ function renderDualVersion() {
     footTr.appendChild(td);
   });
   dvTableFoot.appendChild(footTr);
+}
+
+/* ------------------------------ 库存批次领纸 ------------------------------ */
+
+/** 渲染库存批次领纸：规则说明、汇总 chips、逐帖领用 / 缺口表与逐批剩余张数表；未启用时隐藏整个区块。 */
+function renderStockBatches() {
+  const sb = state.result.stockBatches;
+  if (!sb || !sb.enabled) {
+    stockBatchCard.hidden = true;
+    return;
+  }
+  stockBatchCard.hidden = false;
+  batchFormula.textContent =
+    '各帖需求取自印刷备料的需领纸 requiredSheets；批次可拆给多帖、同帖可跨批次，' +
+    '每批领用不超过可用张数且只能分给允许的帖（未填允许帖号 = 通用批）。' +
+    '按最大流求总缺口最小（= 总领用最大）的分配，同一输入必得同一方案。';
+
+  const t = sb.totals;
+  batchGapBox.hidden = t.fullyCovered;
+  if (!t.fullyCovered) {
+    batchGapBox.textContent = t.availableSheets < t.requiredSheets
+      ? `⚠ 库存不足：总需求 ${formatSheets(t.requiredSheets)} 张，全部批次合计仅 ${formatSheets(t.availableSheets)} 张可用，按总缺口最小分配后仍缺 ${formatSheets(t.gapSheets)} 张（逐帖缺口见下表）。`
+      : `⚠ 受批次允许帖号限制：总需求 ${formatSheets(t.requiredSheets)} 张，库存合计 ${formatSheets(t.availableSheets)} 张，但部分库存只能用于指定帖而无法补足缺口帖，按总缺口最小分配后仍缺 ${formatSheets(t.gapSheets)} 张（逐帖缺口见下表）。`;
+  }
+
+  const chips = [
+    { text: `批次 ${t.batchCount} 个 · 共 ${t.signatureCount} 帖`, cls: 'prep' },
+    { text: `需求合计 ${formatSheets(t.requiredSheets)} 张（备料需领纸）`, cls: 'prep' },
+    { text: `库存合计 ${formatSheets(t.availableSheets)} 张`, cls: 'prep' },
+    { text: `领用合计 ${formatSheets(t.drawnSheets)} 张`, cls: 'prep-total' },
+    { text: `剩余合计 ${formatSheets(t.remainingSheets)} 张`, cls: t.remainingSheets > 0 ? 'prep-warn' : 'prep' },
+    t.fullyCovered
+      ? { text: '全部帖均无缺口', cls: 'prep-ok' }
+      : { text: `总缺口 ${formatSheets(t.gapSheets)} 张`, cls: 'quote-fail' },
+  ];
+  batchSummary.innerHTML = '';
+  chips.forEach(({ text, cls }) => {
+    const span = document.createElement('span');
+    span.className = 'chip' + (cls ? ` ${cls}` : '');
+    span.textContent = text;
+    batchSummary.appendChild(span);
+  });
+
+  // 逐帖：需领纸 / 批次领用明细 / 领用合计 / 缺口（缺口 > 0 的行标出）
+  batchSigTableBody.innerHTML = '';
+  sb.signatures.forEach((row) => {
+    const tr = document.createElement('tr');
+    if (row.gapSheets > 0) tr.className = 'batch-gap-row';
+    const allocText = row.allocations.length
+      ? row.allocations.map((a) => `${a.lot} × ${formatSheets(a.sheets)}`).join(' ＋ ')
+      : '—（无可用批次）';
+    [
+      `第 ${row.signature} 帖`,
+      formatSheets(row.requiredSheets),
+      allocText,
+      formatSheets(row.drawnSheets),
+      row.gapSheets > 0 ? `缺 ${formatSheets(row.gapSheets)}` : '0',
+    ].forEach((text) => {
+      const td = document.createElement('td');
+      td.textContent = text;
+      tr.appendChild(td);
+    });
+    batchSigTableBody.appendChild(tr);
+  });
+
+  batchSigTableFoot.innerHTML = '';
+  const sigFootTr = document.createElement('tr');
+  [
+    '合计',
+    formatSheets(t.requiredSheets),
+    '—',
+    formatSheets(t.drawnSheets),
+    t.gapSheets > 0 ? `缺 ${formatSheets(t.gapSheets)}` : '0',
+  ].forEach((text) => {
+    const td = document.createElement('td');
+    td.textContent = text;
+    sigFootTr.appendChild(td);
+  });
+  batchSigTableFoot.appendChild(sigFootTr);
+
+  // 逐批：可用张数 / 允许帖号 / 领用合计 / 剩余张数 / 领用去向
+  batchLotTableBody.innerHTML = '';
+  sb.batches.forEach((row) => {
+    const tr = document.createElement('tr');
+    if (row.drawnSheets === 0) tr.className = 'quote-row-zero';
+    const allowedText = row.universal ? '全部帖（通用）' : row.allowedSignatures.map((s) => `第 ${s} 帖`).join('、');
+    const allocText = row.allocations.length
+      ? row.allocations.map((a) => `第 ${a.signature} 帖 × ${formatSheets(a.sheets)}`).join(' ＋ ')
+      : '—（未被领用）';
+    [
+      row.index,
+      row.lot,
+      formatSheets(row.availableSheets),
+      allowedText,
+      formatSheets(row.drawnSheets),
+      formatSheets(row.remainingSheets),
+      allocText,
+    ].forEach((text) => {
+      const td = document.createElement('td');
+      td.textContent = text;
+      tr.appendChild(td);
+    });
+    batchLotTableBody.appendChild(tr);
+  });
+
+  batchLotTableFoot.innerHTML = '';
+  const lotFootTr = document.createElement('tr');
+  [
+    '合计',
+    '—',
+    formatSheets(t.availableSheets),
+    '—',
+    formatSheets(t.drawnSheets),
+    formatSheets(t.remainingSheets),
+    '—',
+  ].forEach((text) => {
+    const td = document.createElement('td');
+    td.textContent = text;
+    lotFootTr.appendChild(td);
+  });
+  batchLotTableFoot.appendChild(lotFootTr);
 }
 
 /* ------------------------------ 试印核验 ------------------------------ */

@@ -25,6 +25,7 @@ app.get('/api/health', (req, res) => {
  *   materialPrep?                                            // 可选，印刷备料 { copies, makereadySheets, processWasteRate, sheetsPerPack }；缺省不启用
  *   purchaseQuotes?                                          // 可选，采购报价组合 { demandSheets?, quotes: [{ supplier, sheetsPerPack, pricePerPackCents, minPacks, maxPacks }] }；缺省不启用
  *   dualVersion?                                             // 可选，双版本共版印刷 { copiesA, copiesB, changedPages }；缺省不启用
+ *   stockBatches?                                            // 可选，库存批次领纸 { batches: [{ lot, availableSheets, allowedSignatures? }] }；缺省不启用（需先启用 materialPrep）
  * }
  * 响应：拼版清单 JSON（与前端「导出拼版清单 JSON」内容一致）；
  * 启用试印核验时顶层带 verification（观察、四种装订×翻转候选的评分与结论）；
@@ -36,7 +37,9 @@ app.get('/api/health', (req, res) => {
  * 金额（分）/ 余量与总价，按「总价→超购→供应商数→录入顺序」取唯一方案；
  * 无可行组合时 feasible 为 false 并给出具体缺口张数）；
  * 启用双版本共版时顶层带 dualVersion（逐张逐面的页码 / 印版归属（共用或 A、B 拆版）/
- * 各印版印次，以及面数、印版数与总印次汇总）。
+ * 各印版印次，以及面数、印版数与总印次汇总）；
+ * 启用库存批次领纸时顶层带 stockBatches（各帖需求取自备料需领纸 requiredSheets，
+ * 按最大流求总缺口最小的分配：逐帖批次领用明细与缺口、逐批领用合计与剩余张数）。
  */
 app.post('/api/impose', (req, res) => {
   try {

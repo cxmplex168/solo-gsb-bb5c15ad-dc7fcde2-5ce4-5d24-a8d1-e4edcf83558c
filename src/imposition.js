@@ -6,6 +6,7 @@ const { attachVerification } = require('./verification');
 const { parseMaterialPrepInput, attachMaterialPrep } = require('./materialPrep');
 const { parsePurchaseQuotesInput, attachPurchaseQuotes } = require('./purchaseQuote');
 const { parseDualVersionInput, attachDualVersion } = require('./dualVersion');
+const { parseStockBatchesInput, attachStockBatches } = require('./stockBatches');
 
 /**
  * 骑马钉（saddle-stitch）拼版计算核心。
@@ -100,6 +101,18 @@ const { parseDualVersionInput, attachDualVersion } = require('./dualVersion');
  * - 顶层 dualVersion 段逐面给出帖 / 张 / 面 / 页码 / 印版归属与各印版印次，
  *   并汇总面数、印版数（含较全部拆版节省的印版数）与总印次。
  * - dualVersion 缺省 / null / false 时不启用，不写入任何字段，原响应完全不变。
+ *
+ * 库存批次领纸（inventory batch paper drawing）：
+ * - 可选提供 stockBatches { batches: [{ lot, availableSheets, allowedSignatures? }] }
+ *   （1～12 个库存批次：批号 / 可用张数 / 允许使用的帖号；允许帖号缺省 = 通用批），
+ *   各帖需求取自印刷备料的 requiredSheets，因此**必须先启用 materialPrep**，
+ *   未启用备料时启用本模块返回明确错误。
+ * - 批次可拆给多帖、同帖可跨批次；每批领用不超过可用张数，且只能分给允许的帖。
+ *   以最大流求总缺口最小（= 总领用最大）的分配：源 -> 批次（容量 = 可用张数）、
+ *   批次 -> 允许的帖（容量无限）、帖 -> 汇（容量 = 需领纸）。
+ * - 顶层 stockBatches 段逐帖给出需领纸 / 各批次领用明细 / 缺口，逐批给出
+ *   领用合计 / 剩余张数 / 领用去向，并汇总需求 / 库存 / 领用 / 缺口。
+ * - stockBatches 缺省 / null / false 时不启用，不写入任何字段，原响应完全不变。
  */
 
 const MAX_TOTAL_PAGES = 10000;
@@ -277,12 +290,19 @@ function planChapterSignatures(totalPages, maxSheets, starts) {
  *   { copiesA A 版成品份数（≥1 整数）, copiesB B 版成品份数（≥1 整数）,
  *     changedPages B 版相对 A 版改动的真实页码（单页与区间，去重并校验 1 ~ totalPages，
  *     如 [3, "5-8"] 或 "3, 5-8"） }
+ * @param {object|boolean} [input.stockBatches] 库存批次领纸参数（缺省 / null / false 不启用；
+ *   启用时必须同时启用 materialPrep，各帖需求取自备料需领纸 requiredSheets）：
+ *   { batches: [{ lot 批号（非空、不重复）, availableSheets 可用张数（≥1 整数）,
+ *     allowedSignatures 允许使用的帖号数组（可选，缺省 / 空数组 = 通用批，全部帖可用） }] }
+ *   共 1～12 个批次；批次可拆给多帖、同帖可跨批次，每批领用不超库存、只分给允许的帖，
+ *   按最大流求总缺口最小的分配。
  * @returns {object} 拼版结果（按帖 -> 张 -> 正/背面 -> 左/右页位；启用适配检查时每个页位带 fit；
  *                   启用双面生产标记时每张纸带 productionMarks、顶层带 productionMarks 汇总；
  *                   启用试印核验时顶层带 verification：观察、候选评分与结论；
  *                   启用印刷备料时顶层带 materialPrep：逐帖净用纸 / 损耗 / 需领纸与整包采购汇总；
  *                   启用采购报价组合时顶层带 purchaseQuotes：逐报价采购量 / 金额 / 余量、总价与缺口；
- *                   启用双版本共版时顶层带 dualVersion：逐面印版归属 / 印次与印版、印次汇总）
+ *                   启用双版本共版时顶层带 dualVersion：逐面印版归属 / 印次与印版、印次汇总；
+ *                   启用库存批次领纸时顶层带 stockBatches：逐帖批次领用 / 缺口与逐批剩余张数）
  */
 function computeImposition(input) {
   const totalPages = toInteger(input && input.totalPages);
@@ -297,6 +317,7 @@ function computeImposition(input) {
   const productionMarks = parseProductionMarksInput(input || {}, fit.enabled);
   const materialPrep = parseMaterialPrepInput(input || {});
   const purchaseQuotes = parsePurchaseQuotesInput(input || {});
+  const stockBatches = parseStockBatchesInput(input || {});
 
   if (!Number.isInteger(totalPages) || totalPages < 1 || totalPages > MAX_TOTAL_PAGES) {
     throw new Error(`成品页数必须为 1 ~ ${MAX_TOTAL_PAGES} 的整数`);
@@ -509,7 +530,7 @@ function computeImposition(input) {
   const result = {
     meta: {
       app: 'saddle-stitch-imposition',
-      version: '1.10.0',
+      version: '1.11.0',
       generatedAt: new Date().toISOString(),
     },
     input: {
@@ -589,6 +610,15 @@ function computeImposition(input) {
   const purchaseQuotesResult = attachPurchaseQuotes(result, purchaseQuotes, fallbackSheets);
   if (purchaseQuotesResult) {
     result.purchaseQuotes = purchaseQuotesResult;
+  }
+
+  // 库存批次领纸：stockBatches 缺省 / null / false 时不写入任何字段，原响应完全不变；
+  // 启用时各帖需求取自备料的需领纸 requiredSheets（未启用备料则抛出明确错误），
+  // 以最大流求总缺口最小的分配：批次可拆给多帖、同帖可跨批次，
+  // 每批领用不超库存、只分给允许的帖；逐帖给出批次领用与缺口，逐批给出剩余张数。
+  const stockBatchesResult = attachStockBatches(result, stockBatches, materialPrepResult);
+  if (stockBatchesResult) {
+    result.stockBatches = stockBatchesResult;
   }
 
   // 双版本共版印刷清单：dualVersion 缺省 / null / false 时不写入任何字段，原响应完全不变；

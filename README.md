@@ -17,8 +17,9 @@
 - 可选 **印刷备料**：填写成品份数、每帖开机损耗张数、过程损耗率与每包张数，按拼版结果**各帖实际张数**逐帖计算净用纸，并以 `需领纸 = ceil((净用纸 + 开机损耗) / (1 − 过程损耗率))` **逐帖向上取整**，再汇总后按整包向上采购（**禁止先合并各帖再计算损耗**）；页面逐帖展示净用纸、开机损耗、过程损耗与需领纸及整包采购汇总，导出 JSON 的 `materialPrep` 段附带相同数据；
 - 可选 **采购报价组合**：录入多条本地报价（供应商 / 每包张数 / 每包价格 / 最少 / 最多可购包数），需求张数**默认接入印刷备料的整包采购张数**，也允许**手工填写**；在满足需求与各报价边界的整数包组合中按 **「总价最低 → 超购张数最少 → 供应商数量最少 → 录入顺序（更早录入优先装满）」** 确定唯一方案，价格一律按**分（整数）精确计算**（不使用浮点比较）；页面逐报价展示采购量 / 金额 / 余量，无可行组合时给出**具体缺口张数**，导出 JSON 的 `purchaseQuotes` 段附带相同数据；
 - 可选 **双版本共版印刷清单**：输入 A、B 两版成品份数及 B 版相对 A 版改动的真实页码（支持单页与区间，自动去重并校验页码范围），沿用当前分帖、补白、装订与翻转后的页位**逐张逐面**判定——无改动页的面**共用一块印版**（印次 = A + B），含改动页的面**拆成 A、B 两块印版**各按自身份数印刷，同张纸正背面独立判定；页面逐面展示帖 / 张 / 面 / 页码 / 印版归属与印次汇总，导出 JSON 的 `dualVersion` 段附带相同清单；
+- 可选 **库存批次领纸**（需先启用印刷备料）：录入 1～12 个库存批次（批号 / 可用张数 / 允许使用的帖号，允许帖号留空 = 通用批），各帖需求自动取自备料的**需领纸 `requiredSheets`**；批次可拆给多帖、同帖可跨批次，但**每批领用不超过可用张数**且**只能分给允许的帖**，系统以**最大流**求**总缺口最小（= 总领用最大）**的分配（例如两帖各需 10 张、通用批与仅供第 1 帖的批各 10 张时，专用批自动留给第 1 帖、通用批分给第 2 帖，两帖均无缺口）；页面逐帖列出各批次领用与缺口、逐批列出领用合计与剩余张数，导出 JSON 的 `stockBatches` 段附带相同数据；
 - 画布**逐张显示**纸面、页码、空白页位与翻转方向示意；
-- 一键**导出拼版清单 JSON**（包含适配检查、试印核验、印刷备料、采购报价组合与双版本共版印刷清单结果）。
+- 一键**导出拼版清单 JSON**（包含适配检查、试印核验、印刷备料、采购报价组合、双版本共版印刷清单与库存批次领纸结果）。
 
 ## 快速开始（Docker Compose 一键启动）
 
@@ -422,6 +423,57 @@ npm test           # 运行拼版逻辑单元测试
 
 前端结果区「**双版本共版印刷**」面板逐面列出帖 / 张 / 面 / 左右页位页码 / 本面改动页 / 印版归属（共用 1 块或拆 A、B 两块）/ 印次，拆版面以底色标出，底部汇总行给出面数、印版总数与总印次；顶部 chips 给出两版份数、改动页数、共版 / 拆版面数、印版合计与节省印版数。导出的拼版清单 JSON 含同一 `dualVersion` 段。共版判定只读取拼版结果的页位，固定 / 均衡 / 章节优先分帖均可启用，不影响页码拼版本身。
 
+### 库存批次领纸（inventory batch paper drawing）
+
+勾选表单中的「库存批次领纸」并录入 1～12 个库存批次后启用（API 传 `stockBatches: { batches: [...] }`）；缺省 / 不传 / `null` / `false` / `{ "enabled": false }` 时**不启用，响应中不含任何批次领纸字段，与旧版本完全一致**。
+
+**前置条件：必须先启用印刷备料**（`materialPrep`）——各帖需求直接取自备料结果 `materialPrep.signatures[].requiredSheets`（已含开机损耗与过程损耗率的逐帖取整），未启用备料时启用本模块返回 400 明确错误。
+
+- 每个 **批次** `batches[]`（1～12 个）：
+  - `lot`：批号（非空字符串，≤ 50 字符，**同次请求内不可重复**）；
+  - `availableSheets`：可用张数（≥ 1 的整数）；
+  - `allowedSignatures`（**可选**）：允许使用的帖号数组（1 ~ 实际帖数的整数，同批内不可重复）；**缺省 / `null` / 空数组 = 通用批（全部帖可用）**。
+
+分配规则与求解：
+
+- **批次可拆给多帖、同帖可跨批次**（分配单位为整张纸）；
+- **每批领用合计不得超过其可用张数**（库存约束），**每批只能分给允许使用的帖**；
+- 优化目标为**总缺口最小**：总缺口 = Σ（各帖需领纸 − 各帖实际领用），等价于总领用最大。建模为最大流求解（源 → 批次容量 = 可用张数，批次 → 允许的帖容量无限，帖 → 汇容量 = 需领纸），同一输入必得同一分配（确定性输出）。
+
+> 为什么需要最大流而不是顺序贪心：两帖各需 10 张，一个通用批（10 张）与一个仅供第 1 帖的批（10 张）时，若通用批先分给第 1 帖，专用批将无处可去、第 2 帖缺 10 张；最大流会自动**重路由**——专用批留给第 1 帖、通用批分给第 2 帖，两帖均无缺口。
+
+示例：8 页、每帖 1 张（2 帖各 1 张）、份数 10、无损耗（每帖需领纸 10 张），批次 `ALL`（通用，10 张）与 `S1`（仅第 1 帖，10 张）：
+
+```json
+{
+  "enabled": true,
+  "demandSource": "materialPrep.requiredSheets",
+  "batches": [
+    { "index": 1, "lot": "ALL", "availableSheets": 10, "universal": true, "allowedSignatures": null,
+      "drawnSheets": 10, "remainingSheets": 0, "allocations": [{ "signature": 2, "sheets": 10 }] },
+    { "index": 2, "lot": "S1", "availableSheets": 10, "universal": false, "allowedSignatures": [1],
+      "drawnSheets": 10, "remainingSheets": 0, "allocations": [{ "signature": 1, "sheets": 10 }] }
+  ],
+  "signatures": [
+    { "signature": 1, "requiredSheets": 10, "drawnSheets": 10, "gapSheets": 0,
+      "allocations": [{ "batch": 2, "lot": "S1", "sheets": 10 }] },
+    { "signature": 2, "requiredSheets": 10, "drawnSheets": 10, "gapSheets": 0,
+      "allocations": [{ "batch": 1, "lot": "ALL", "sheets": 10 }] }
+  ],
+  "totals": {
+    "signatureCount": 2, "batchCount": 2,
+    "requiredSheets": 20, "availableSheets": 20,
+    "drawnSheets": 20, "remainingSheets": 0,
+    "gapSheets": 0, "fullyCovered": true
+  }
+}
+```
+
+**库存不足不是错误**：响应仍为 200，`totals.fullyCovered` 为 `false`，逐帖 `gapSheets` 给出缺口、逐批 `remainingSheets` 给出剩余（受帖号限制而无法用出的库存会如实剩余）。
+
+前端结果区「**库存批次领纸**」面板分两张表：**逐帖**列出需领纸、各批次领用明细、领用合计与缺口（缺口行标红，顶部红色横幅提示总缺口）；**逐批**列出可用张数、允许帖号、领用合计、**剩余张数**与领用去向。导出的拼版清单 JSON 含同一 `stockBatches` 段。重复批号、无效帖号（非整数 / 超出帖数范围 / 同批重复）、批次数量越界（< 1 或 > 12）、可用张数非法，以及未启用备料时启用本模块，均返回 400 明确错误。
+
+
 ## API
 
 ### `POST /api/impose`
@@ -468,6 +520,12 @@ npm test           # 运行拼版逻辑单元测试
     "copiesA": 1000,
     "copiesB": 500,
     "changedPages": [3, "5-8"]
+  },
+  "stockBatches": {
+    "batches": [
+      { "lot": "A01", "availableSheets": 3000 },
+      { "lot": "B02", "availableSheets": 1500, "allowedSignatures": [1, 2] }
+    ]
   }
 }
 ```
@@ -507,6 +565,10 @@ npm test           # 运行拼版逻辑单元测试
   - `changedPages`：B 版相对 A 版改动的真实页码，支持单页与区间——数组形式如 `[3, "5-8", { "start": 10, "end": 12 }]`，或直接给字符串 `"3, 5-8"`（逗号 / 顿号 / 分号 / 空白分隔，区间连字符支持 `- – — ~`）；自动去重并升序，每个页码必须为 1 ~ totalPages 的整数，区间起点不得大于终点，启用时至少 1 个改动页；
   - 逐张逐面判定：无改动页的面共用一块印版（印次 = A + B），含改动页的面拆成 A、B 两块印版各按自身份数印刷，同张纸正背面独立判定；
   - 参数非对象、份数非正整数、改动页缺失 / 为空 / 非整数 / 越界 / 区间倒置 / 条目无法解析等均返回 400 明确错误。
+- `stockBatches`：**可选**，库存批次领纸参数对象（缺省 / `null` / `false` 不启用，响应不含批次领纸字段，与旧版本完全一致）。**启用时必须同时提供有效的 `materialPrep`**（各帖需求取自 `materialPrep.signatures[].requiredSheets`），未启用备料时启用本模块返回 400 明确错误。字段：
+  - `batches`：1～12 个批次，每个含 `lot`（批号，非空、≤ 50 字符、同次请求内不可重复）/ `availableSheets`（可用张数，≥ 1 的整数）/ `allowedSignatures`（可选，允许使用的帖号数组，1 ~ 实际帖数的整数、同批内不可重复；缺省 / `null` / 空数组 = 通用批，全部帖可用）；
+  - 批次可拆给多帖、同帖可跨批次，每批领用不超可用张数、只分给允许的帖；按最大流求**总缺口最小**的分配，逐帖返回批次领用明细与缺口、逐批返回领用合计与剩余张数；库存不足时响应仍为 200，`totals.fullyCovered` 为 `false` 并给出逐帖缺口；
+  - 批次非数组 / 为空 / 超过 12 个、批号为空或重复、可用张数非正整数、帖号非整数 / 超出范围 / 同批重复等均返回 400 明确错误。
 
 后两个爬移参数任一为 0（或不传）时不做爬移补偿，所有页位 `offsetMm` 为 0，旧调用方无需改动。
 
@@ -628,7 +690,7 @@ npm test           # 运行拼版逻辑单元测试
 
 启用双版本共版印刷时，顶层增加 `dualVersion`（结构与示例见上文「双版本共版印刷」一节）：回显 `copiesA` / `copiesB` 与去重升序后的 `changedPages`；`rows[]` 逐面给出 `signature` / `sheet` / `side` / `leftPage` / `rightPage`（空白页位为 `null`）/ `changedPages`（本面含有的改动页）/ `shared`（是否共版）/ `plates[]`（共版为 1 块 `shared` 印版、印次 = A + B；拆版为 `A`、`B` 两块印版、各按自身份数印刷）；`totals` 汇总 `sideCount`（面数）/ `sharedSideCount` / `splitSideCount` / `sharedPlateCount` / `splitPlateCount` / `plateCount`（印版总数）/ `savedPlateCount`（较全部拆版节省的印版数）/ `impressions`（总印次）。未启用时响应中不含 `dualVersion` 字段。
 
-参数非法时返回 `400` 与错误信息（含纸张厚度 / 最大补偿量为负，尺寸参数为负、非数字或只提供部分尺寸，`balancedSplit` / `chapterSplit` 非布尔值，两种分帖模式同时启用，章节起始页非数组 / 为空 / 非整数 / 重复 / 未递增 / 越界，观察记录非数组 / 超过 12 条 / 索引越界 / 重复观察 / 字段非法，`productionMarks` 非布尔值、未启用适配检查就开启生产标记、`markSizeMm` 非正数或超过 100mm，备料参数 `materialPrep` 非对象、成品份数 / 每包张数非正整数、开机损耗为负、过程损耗率不在 [0, 1)，采购报价 `purchaseQuotes` 非对象、未启用备料又未给需求张数、报价非数组 / 为空 / 超过 8 条、供应商为空或重复、每包张数非正整数、每包价格（分）为负或非整数、包数边界非法（< 0 / < 1 / 最多少于最少），以及双版本共版 `dualVersion` 非对象、A / B 版份数非正整数、改动页码缺失 / 为空 / 非整数 / 越界（1 ~ totalPages）/ 区间起点大于终点 / 条目无法解析等情况）。另提供 `GET /api/health` 健康检查。
+参数非法时返回 `400` 与错误信息（含纸张厚度 / 最大补偿量为负，尺寸参数为负、非数字或只提供部分尺寸，`balancedSplit` / `chapterSplit` 非布尔值，两种分帖模式同时启用，章节起始页非数组 / 为空 / 非整数 / 重复 / 未递增 / 越界，观察记录非数组 / 超过 12 条 / 索引越界 / 重复观察 / 字段非法，`productionMarks` 非布尔值、未启用适配检查就开启生产标记、`markSizeMm` 非正数或超过 100mm，备料参数 `materialPrep` 非对象、成品份数 / 每包张数非正整数、开机损耗为负、过程损耗率不在 [0, 1)，采购报价 `purchaseQuotes` 非对象、未启用备料又未给需求张数、报价非数组 / 为空 / 超过 8 条、供应商为空或重复、每包张数非正整数、每包价格（分）为负或非整数、包数边界非法（< 0 / < 1 / 最多少于最少），双版本共版 `dualVersion` 非对象、A / B 版份数非正整数、改动页码缺失 / 为空 / 非整数 / 越界（1 ~ totalPages）/ 区间起点大于终点 / 条目无法解析，以及库存批次领纸 `stockBatches` 非对象、未启用备料就启用本模块、批次非数组 / 为空 / 超过 12 个、批号为空或重复、可用张数非正整数、允许帖号非整数 / 超出帖数范围 / 同批重复等情况）。另提供 `GET /api/health` 健康检查。
 
 调用示例（生成带双面生产标记的拼版清单，460×330 纸张放 210×297 成品页，短边翻转）：
 
@@ -712,6 +774,33 @@ curl -s -X POST http://localhost:8080/api/impose \
 #                  "savedPlateCount": 4, "impressions": 12000 } }
 ```
 
+调用示例（启用库存批次领纸：8 页、每帖 1 张共 2 帖，份数 10、无损耗 -> 每帖需领纸 10 张；通用批 10 张 + 仅供第 1 帖的批 10 张，两帖均无缺口）：
+
+```bash
+curl -s -X POST http://localhost:8080/api/impose \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "totalPages": 8,
+    "sheetsPerSignature": 1,
+    "binding": "left",
+    "flip": "short",
+    "materialPrep": { "copies": 10, "makereadySheets": 0, "processWasteRate": 0, "sheetsPerPack": 100 },
+    "stockBatches": {
+      "batches": [
+        { "lot": "ALL", "availableSheets": 10 },
+        { "lot": "S1", "availableSheets": 10, "allowedSignatures": [1] }
+      ]
+    }
+  }' | jq '.stockBatches | { signatures: [.signatures[] | { signature, drawnSheets, gapSheets }], batches: [.batches[] | { lot, drawnSheets, remainingSheets }], totals }'
+# => { "signatures": [ { "signature": 1, "drawnSheets": 10, "gapSheets": 0 },
+#                      { "signature": 2, "drawnSheets": 10, "gapSheets": 0 } ],
+#      "batches": [ { "lot": "ALL", "drawnSheets": 10, "remainingSheets": 0 },
+#                   { "lot": "S1", "drawnSheets": 10, "remainingSheets": 0 } ],
+#      "totals": { "signatureCount": 2, "batchCount": 2, "requiredSheets": 20,
+#                  "availableSheets": 20, "drawnSheets": 20, "remainingSheets": 0,
+#                  "gapSheets": 0, "fullyCovered": true } }
+```
+
 ## 目录结构
 
 ```
@@ -723,7 +812,8 @@ curl -s -X POST http://localhost:8080/api/impose \
 ├── src/materialPrep.js    # 印刷备料（逐帖净用纸 / 开机损耗 / 过程损耗 / 需领纸 ceil、整包采购汇总）
 ├── src/purchaseQuote.js   # 采购报价组合（分整数计价、边界约束、四级排序唯一方案、缺口、有界 DP 求解）
 ├── src/dualVersion.js     # 双版本共版印刷（改动页码解析校验、逐张逐面印版归属判定、印版 / 印次汇总）
-├── public/                # 前端（原生 Canvas 逐张绘制、原始/补偿页位叠加、适配标记、生产标记、试印核验面板、印刷备料面板、采购报价组合面板、双版本共版面板、JSON 导出）
+├── src/stockBatches.js    # 库存批次领纸（批次录入校验、最大流求总缺口最小分配、逐帖缺口与逐批剩余）
+├── public/                # 前端（原生 Canvas 逐张绘制、原始/补偿页位叠加、适配标记、生产标记、试印核验面板、印刷备料面板、采购报价组合面板、双版本共版面板、库存批次领纸面板、JSON 导出）
 │   ├── index.html
 │   ├── app.js
 │   └── style.css
@@ -735,6 +825,7 @@ curl -s -X POST http://localhost:8080/api/impose \
 ├── test/materialPrep.test.js
 ├── test/purchaseQuote.test.js
 ├── test/dualVersion.test.js
+├── test/stockBatches.test.js
 ├── test/api.test.js
 ├── Dockerfile
 └── docker-compose.yml

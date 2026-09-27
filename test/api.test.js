@@ -699,3 +699,120 @@ test('双版本共版：非法参数返回 400', async () => {
     await srv.close();
   }
 });
+
+/* ------------------------------ 库存批次领纸 ------------------------------ */
+
+// 8 页、每帖 1 张 -> 2 帖各 1 张；份数 10、无损耗 -> 每帖需领纸 10 张
+const PREP10 = { copies: 10, makereadySheets: 0, processWasteRate: 0, sheetsPerPack: 100 };
+const BASE_SIG2 = { totalPages: 8, sheetsPerSignature: 1, binding: 'left', flip: 'short' };
+
+test('库存批次领纸：响应含逐帖领用 / 缺口与逐批剩余张数；未启用不带该字段', async () => {
+  const srv = await startServer();
+  try {
+    // 任务示例：两帖各需 10 张，通用批与仅供第 1 帖的批各 10 张 -> 均无缺口
+    const res = await postJson(`${srv.baseUrl}/api/impose`, {
+      ...BASE_SIG2,
+      materialPrep: PREP10,
+      stockBatches: {
+        batches: [
+          { lot: 'ALL', availableSheets: 10 },
+          { lot: 'S1', availableSheets: 10, allowedSignatures: [1] },
+        ],
+      },
+    });
+    assert.equal(res.status, 200);
+    const sb = res.body.stockBatches;
+    assert.equal(sb.enabled, true);
+    assert.equal(sb.demandSource, 'materialPrep.requiredSheets');
+    assert.deepEqual(
+      sb.signatures.map((s) => [s.requiredSheets, s.drawnSheets, s.gapSheets]),
+      [[10, 10, 0], [10, 10, 0]]
+    );
+    assert.deepEqual(sb.signatures[0].allocations, [{ batch: 2, lot: 'S1', sheets: 10 }]);
+    assert.deepEqual(sb.signatures[1].allocations, [{ batch: 1, lot: 'ALL', sheets: 10 }]);
+    assert.deepEqual(sb.batches.map((b) => b.remainingSheets), [0, 0]);
+    assert.equal(sb.totals.fullyCovered, true);
+    assert.equal(sb.totals.gapSheets, 0);
+
+    // 未启用：响应不含 stockBatches 字段（原响应不变）
+    const off = await postJson(`${srv.baseUrl}/api/impose`, { ...BASE_SIG2, materialPrep: PREP10 });
+    assert.equal(off.status, 200);
+    assert.equal('stockBatches' in off.body, false);
+    // 显式关闭同样不带字段
+    const disabled = await postJson(`${srv.baseUrl}/api/impose`, {
+      ...BASE_SIG2,
+      materialPrep: PREP10,
+      stockBatches: { enabled: false, batches: [{ lot: 'A', availableSheets: 1 }] },
+    });
+    assert.equal(disabled.status, 200);
+    assert.equal('stockBatches' in disabled.body, false);
+  } finally {
+    await srv.close();
+  }
+});
+
+test('库存批次领纸：库存不足时响应 200 并给出逐帖缺口与逐批剩余（导出 JSON 可见）', async () => {
+  const srv = await startServer();
+  try {
+    const res = await postJson(`${srv.baseUrl}/api/impose`, {
+      ...BASE_SIG2,
+      materialPrep: PREP10,
+      stockBatches: { batches: [{ lot: 'ALL', availableSheets: 15 }] },
+    });
+    assert.equal(res.status, 200);
+    const sb = res.body.stockBatches;
+    assert.equal(sb.totals.fullyCovered, false);
+    assert.equal(sb.totals.gapSheets, 5);
+    assert.deepEqual(
+      sb.signatures.map((s) => [s.drawnSheets, s.gapSheets]),
+      [[10, 0], [5, 5]]
+    );
+    assert.equal(sb.batches[0].drawnSheets, 15);
+    assert.equal(sb.batches[0].remainingSheets, 0);
+  } finally {
+    await srv.close();
+  }
+});
+
+test('库存批次领纸：未启用备料 / 重复批号 / 无效帖号返回 400 明确错误', async () => {
+  const srv = await startServer();
+  try {
+    const noPrep = await postJson(`${srv.baseUrl}/api/impose`, {
+      ...BASE_SIG2,
+      stockBatches: { batches: [{ lot: 'A', availableSheets: 10 }] },
+    });
+    assert.equal(noPrep.status, 400);
+    assert.match(noPrep.body.error, /需先启用印刷备料/);
+
+    const dupLot = await postJson(`${srv.baseUrl}/api/impose`, {
+      ...BASE_SIG2,
+      materialPrep: PREP10,
+      stockBatches: {
+        batches: [
+          { lot: 'A01', availableSheets: 10 },
+          { lot: 'A01', availableSheets: 5 },
+        ],
+      },
+    });
+    assert.equal(dupLot.status, 400);
+    assert.match(dupLot.body.error, /批号重复/);
+
+    const badSig = await postJson(`${srv.baseUrl}/api/impose`, {
+      ...BASE_SIG2,
+      materialPrep: PREP10,
+      stockBatches: { batches: [{ lot: 'A', availableSheets: 10, allowedSignatures: [3] }] },
+    });
+    assert.equal(badSig.status, 400);
+    assert.match(badSig.body.error, /帖号 3 超出范围（1 ~ 2）/);
+
+    const tooMany = await postJson(`${srv.baseUrl}/api/impose`, {
+      ...BASE_SIG2,
+      materialPrep: PREP10,
+      stockBatches: { batches: Array.from({ length: 13 }, (_, i) => ({ lot: `L${i}`, availableSheets: 1 })) },
+    });
+    assert.equal(tooMany.status, 400);
+    assert.match(tooMany.body.error, /最多录入 12 个/);
+  } finally {
+    await srv.close();
+  }
+});

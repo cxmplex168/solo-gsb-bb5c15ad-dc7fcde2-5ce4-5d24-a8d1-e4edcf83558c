@@ -172,6 +172,30 @@
         <label for="dvChangedPages">B 版改动页码（单页 / 区间，逗号分隔）</label>
         <input id="dvChangedPages" type="text" placeholder="如 3, 5-8, 12" disabled>
       </div>
+      <div class="field checkbox-field">
+        <label for="stockBatchesEnabled">
+          <input id="stockBatchesEnabled" type="checkbox">
+          <span>库存批次领纸（需先启用印刷备料：各帖需求取自备料需领纸；录入 1～12 个库存批次，按总缺口最小分配——批次可拆给多帖、同帖可跨批次，每批领用不超库存且只分给允许的帖）</span>
+        </label>
+      </div>
+      <div class="batch-editor" id="batchEditor" hidden>
+        <div class="batch-editor-head">
+          <span>批号</span>
+          <span>可用张数</span>
+          <span>允许帖号（留空 = 全部帖通用）</span>
+          <span>操作</span>
+        </div>
+        <div id="batchRows"></div>
+        <div class="field actions">
+          <button type="button" id="addBatchBtn" class="ghost">＋ 添加批次</button>
+          <span class="hint" id="batchCountHint"></span>
+        </div>
+        <p class="hint">
+          每个批次填写批号、可用张数与允许使用的帖号（逗号分隔，如 1, 3；留空表示通用批、全部帖可用）。
+          批号不可重复；帖号须在 1 ~ 实际帖数之间。批次可拆给多帖、同帖可跨批次，
+          系统按「总缺口最小（= 总领用最大）」求分配：每批领用不超过可用张数，且只能分给允许的帖。最多录入 12 个批次。
+        </p>
+      </div>
       <div class="field actions">
         <button type="submit">生成拼版</button>
       </div>
@@ -219,6 +243,15 @@
       <strong>含改动页的面拆成 A、B 两块印版</strong>（各按自身份数印刷），同一张纸的正、背面独立判定。
       结果区逐面展示帖 / 张 / 面 / 页码 / 印版归属与印次，并汇总印版数（含较全部拆版节省的印版数）与总印次；
       导出的拼版清单 JSON 在 <code>dualVersion</code> 段附带相同清单。不勾选时响应与之前完全一致。
+    </p>
+    <p class="hint">
+      库存批次领纸（可选，需先启用印刷备料）：勾选后录入 1～12 个库存批次——批号、可用张数与允许使用的帖号
+      （留空 = 通用批、全部帖可用）。各帖需求自动取自印刷备料的<strong>需领纸 requiredSheets</strong>；
+      批次可拆给多帖、同帖可跨批次，但<strong>每批领用不得超过可用张数</strong>，且<strong>只能分给允许的帖</strong>。
+      系统以最大流求<strong>总缺口最小（= 总领用最大）</strong>的分配——例如两帖各需 10 张，
+      一个通用批与一个仅供第 1 帖的批各有 10 张时，专用批自动留给第 1 帖、通用批分给第 2 帖，两帖均无缺口。
+      结果区逐帖列出各批次领用与缺口、逐批列出领用合计与剩余张数；
+      导出的拼版清单 JSON 在 <code>stockBatches</code> 段附带相同数据。不勾选时响应与之前完全一致。
     </p>
     <p class="error" id="errorBox" hidden></p>
   </section>
@@ -345,6 +378,39 @@
             <tr>
               <th>帖</th><th>张</th><th>面</th><th>左页位</th><th>右页位</th>
               <th>改动页</th><th>印版归属</th><th>印次</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+          <tfoot></tfoot>
+        </table>
+      </div>
+    </section>
+
+    <section id="stockBatchCard" class="prep-card" hidden>
+      <h2>库存批次领纸</h2>
+      <p class="hint" id="batchFormula"></p>
+      <div id="batchGap" class="quote-gap" hidden></div>
+      <div class="summary" id="batchSummary"></div>
+      <h3>逐帖领用与缺口</h3>
+      <div class="table-wrap">
+        <table id="batchSigTable">
+          <thead>
+            <tr>
+              <th>帖</th><th>需领纸（张）</th><th>批次领用明细</th>
+              <th>领用合计（张）</th><th>缺口（张）</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+          <tfoot></tfoot>
+        </table>
+      </div>
+      <h3>逐批剩余张数</h3>
+      <div class="table-wrap">
+        <table id="batchLotTable">
+          <thead>
+            <tr>
+              <th>#</th><th>批号</th><th>可用张数</th><th>允许帖号</th>
+              <th>领用合计（张）</th><th>剩余张数</th><th>领用去向</th>
             </tr>
           </thead>
           <tbody></tbody>

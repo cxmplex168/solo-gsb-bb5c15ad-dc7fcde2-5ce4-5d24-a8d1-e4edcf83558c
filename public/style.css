@@ -323,6 +323,57 @@ button.ghost:disabled {
   background: #fff8ec;
 }
 
+/* ------------------------------ 库存批次领纸 ------------------------------ */
+
+.batch-editor {
+  border: 1px dashed #c4ccd9;
+  border-radius: 8px;
+  padding: 10px 12px;
+  margin: 4px 0 8px 20px;
+  background: #fcfdfe;
+}
+
+.batch-editor-head,
+.batch-row {
+  display: grid;
+  grid-template-columns: 1fr 0.9fr 1.6fr auto;
+  gap: 8px;
+  align-items: center;
+}
+
+.batch-editor-head {
+  font-size: 12px;
+  color: #5a6b85;
+  padding: 0 2px 6px;
+}
+
+.batch-row {
+  margin-bottom: 8px;
+}
+
+.batch-row input {
+  width: 100%;
+}
+
+#batchSigTable tfoot td,
+#batchLotTable tfoot td {
+  background: #f4f6fa;
+  font-weight: 600;
+  position: sticky;
+  bottom: 0;
+}
+
+#batchSigTable tr.batch-gap-row td {
+  background: #fde8e8;
+  color: #a61b1b;
+}
+
+#stockBatchCard h3 {
+  margin: 14px 0 6px;
+  font-size: 15px;
+  color: #16233b;
+}
+
 .slot-fit {
   margin-top: 2px;
   font-size: 12px;
