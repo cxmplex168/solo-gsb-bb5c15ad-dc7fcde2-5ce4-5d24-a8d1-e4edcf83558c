@@ -607,6 +607,134 @@ test('采购报价组合：未启用备料又未给需求张数 / 非法参数�
   }
 });
 
+/* ------------------------------ 库存批次领纸 ------------------------------ */
+
+// 16 页、每帖 2 张 -> 2 帖各 2 张；copies 5、开机 0、损耗 0 -> 每帖需领纸 10 张
+const BATCH_BASE = { totalPages: 16, sheetsPerSignature: 2, binding: 'left', flip: 'short' };
+const BATCH_PREP = { copies: 5, makereadySheets: 0, processWasteRate: 0, sheetsPerPack: 100 };
+
+test('库存批次领纸：响应 batchDraw 含逐帖领用 / 缺口与逐批剩余；未启用不带该字段', async () => {
+  const srv = await startServer();
+  try {
+    const res = await postJson(`${srv.baseUrl}/api/impose`, {
+      ...BATCH_BASE,
+      materialPrep: BATCH_PREP,
+      batchDraw: {
+        batches: [
+          { batchNo: '通用批', availableSheets: 10, signatures: 'all' },
+          { batchNo: '专用批', availableSheets: 10, signatures: [1] },
+        ],
+      },
+    });
+    assert.equal(res.status, 200);
+    const bd = res.body.batchDraw;
+    assert.equal(bd.enabled, true);
+    assert.equal(bd.demandSource, 'materialPrep');
+    // 任务示例：两帖各需 10 张，通用批与仅供第 1 帖的批各 10 张 -> 均无缺口
+    assert.deepEqual(bd.signatures.map((s) => [s.signature, s.requiredSheets, s.drawnSheets, s.shortageSheets]), [
+      [1, 10, 10, 0],
+      [2, 10, 10, 0],
+    ]);
+    const special = bd.batches.find((b) => b.batchNo === '专用批');
+    const general = bd.batches.find((b) => b.batchNo === '通用批');
+    assert.deepEqual(special.allocations, [{ signature: 1, sheets: 10 }]);
+    assert.deepEqual(general.allocations, [{ signature: 2, sheets: 10 }]);
+    assert.deepEqual(general.allowedSignatures, [1, 2]); // "all" 展开
+    assert.equal(special.remainingSheets, 0);
+    assert.equal(general.remainingSheets, 0);
+    assert.equal(bd.totals.feasible, true);
+    assert.equal(bd.totals.shortageSheets, 0);
+    assert.equal(bd.totals.drawnSheets, 20);
+    // 逐帖领用明细与导出清单中的帖一一对应
+    assert.equal(bd.signatures.length, res.body.signatureCount);
+    assert.deepEqual(bd.signatures[0].draws, [{ batch: 2, batchNo: '专用批', sheets: 10 }]);
+
+    // 未启用：响应不含 batchDraw 字段（原响应不变）
+    const off = await postJson(`${srv.baseUrl}/api/impose`, { ...BATCH_BASE, materialPrep: BATCH_PREP });
+    assert.equal(off.status, 200);
+    assert.equal('batchDraw' in off.body, false);
+    // 显式关闭同样不带字段
+    const disabled = await postJson(`${srv.baseUrl}/api/impose`, {
+      ...BATCH_BASE,
+      materialPrep: BATCH_PREP,
+      batchDraw: { enabled: false, batches: [{ batchNo: 'A', availableSheets: 1, signatures: 'all' }] },
+    });
+    assert.equal(disabled.status, 200);
+    assert.equal('batchDraw' in disabled.body, false);
+  } finally {
+    await srv.close();
+  }
+});
+
+test('库存批次领纸：库存不足时总缺口最小（200 + feasible:false），逐帖缺口明确', async () => {
+  const srv = await startServer();
+  try {
+    const res = await postJson(`${srv.baseUrl}/api/impose`, {
+      ...BATCH_BASE,
+      materialPrep: BATCH_PREP,
+      batchDraw: {
+        batches: [
+          { batchNo: '通用批', availableSheets: 10, signatures: 'all' },
+          { batchNo: '专用批', availableSheets: 6, signatures: [1] },
+        ],
+      },
+    });
+    assert.equal(res.status, 200);
+    const bd = res.body.batchDraw;
+    assert.equal(bd.totals.feasible, false);
+    assert.equal(bd.totals.shortageSheets, 4); // 需求 20 − 库存 16
+    assert.deepEqual(bd.signatures.map((s) => [s.drawnSheets, s.shortageSheets]), [[10, 0], [6, 4]]);
+    assert.equal(bd.totals.remainingSheets, 0);
+  } finally {
+    await srv.close();
+  }
+});
+
+test('库存批次领纸：未启用备料 / 重复批号 / 无效帖号返回 400 明确错误', async () => {
+  const srv = await startServer();
+  try {
+    const noPrep = await postJson(`${srv.baseUrl}/api/impose`, {
+      ...BATCH_BASE,
+      batchDraw: { batches: [{ batchNo: 'A', availableSheets: 10, signatures: 'all' }] },
+    });
+    assert.equal(noPrep.status, 400);
+    assert.match(noPrep.body.error, /库存批次领纸需要先启用印刷备料/);
+
+    const dupNo = await postJson(`${srv.baseUrl}/api/impose`, {
+      ...BATCH_BASE,
+      materialPrep: BATCH_PREP,
+      batchDraw: {
+        batches: [
+          { batchNo: 'P001', availableSheets: 10, signatures: [1] },
+          { batchNo: 'P001', availableSheets: 10, signatures: [2] },
+        ],
+      },
+    });
+    assert.equal(dupNo.status, 400);
+    assert.match(dupNo.body.error, /批号重复/);
+
+    const badSig = await postJson(`${srv.baseUrl}/api/impose`, {
+      ...BATCH_BASE,
+      materialPrep: BATCH_PREP,
+      batchDraw: { batches: [{ batchNo: 'A', availableSheets: 10, signatures: [3] }] },
+    });
+    assert.equal(badSig.status, 400);
+    assert.match(badSig.body.error, /允许帖号 3 超出范围/);
+
+    const tooMany = await postJson(`${srv.baseUrl}/api/impose`, {
+      ...BATCH_BASE,
+      materialPrep: BATCH_PREP,
+      batchDraw: {
+        batches: Array.from({ length: 13 }, (_, i) => ({ batchNo: `B${i}`, availableSheets: 1, signatures: 'all' })),
+      },
+    });
+    assert.equal(tooMany.status, 400);
+    assert.match(tooMany.body.error, /最多录入 12 个/);
+  } finally {
+    await srv.close();
+  }
+});
+
 /* ------------------------------ 双版本共版印刷 ------------------------------ */
 
 test('双版本共版：响应 dualVersion 含逐面印版归属 / 印次与汇总；未启用不带该字段', async () => {

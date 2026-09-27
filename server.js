@@ -23,6 +23,7 @@ app.get('/api/health', (req, res) => {
  *   productionMarks?, markSizeMm?,                          // 可选，双面生产标记（需启用适配检查）
  *   observations?                                            // 可选，试印核验观察（1～12 条；缺省/空数组不启用）
  *   materialPrep?                                            // 可选，印刷备料 { copies, makereadySheets, processWasteRate, sheetsPerPack }；缺省不启用
+ *   batchDraw?                                               // 可选，库存批次领纸 { batches: [{ batchNo, availableSheets, signatures }] }；缺省不启用（需先启用印刷备料）
  *   purchaseQuotes?                                          // 可选，采购报价组合 { demandSheets?, quotes: [{ supplier, sheetsPerPack, pricePerPackCents, minPacks, maxPacks }] }；缺省不启用
  *   dualVersion?                                             // 可选，双版本共版印刷 { copiesA, copiesB, changedPages }；缺省不启用
  * }
@@ -32,6 +33,8 @@ app.get('/api/health', (req, res) => {
  * 顶层 productionMarks 给出尺寸、正背坐标变换与放置 / 省略汇总；
  * 启用印刷备料时顶层带 materialPrep（逐帖净用纸 / 开机损耗 / 过程损耗 / 需领纸，
  * 以及汇总后的整包采购包数 / 采购张数 / 包余；逐帖取整后再汇总）；
+ * 启用库存批次领纸时顶层带 batchDraw（各帖需求取自备料逐帖需领纸，
+ * 按最大流求总缺口最小的批次 → 帖分配：逐帖批次领用与缺口、逐批剩余张数）；
  * 启用采购报价组合时顶层带 purchaseQuotes（需求张数、逐报价采购包数 / 张数 /
  * 金额（分）/ 余量与总价，按「总价→超购→供应商数→录入顺序」取唯一方案；
  * 无可行组合时 feasible 为 false 并给出具体缺口张数）；

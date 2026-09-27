@@ -237,6 +237,64 @@ button.ghost:disabled {
   bottom: 0;
 }
 
+/* ------------------------------ 库存批次领纸 ------------------------------ */
+
+.batch-subfield {
+  margin-left: 20px;
+}
+
+.batch-editor-head,
+.batch-row {
+  display: grid;
+  grid-template-columns: 1.2fr 0.8fr 1.6fr auto;
+  gap: 8px;
+  align-items: center;
+}
+
+.batch-editor-head {
+  font-size: 12px;
+  color: #5a6b85;
+  padding: 0 2px 6px;
+}
+
+.batch-row {
+  margin-bottom: 8px;
+}
+
+.batch-row input {
+  width: 100%;
+}
+
+.prep-card h3 {
+  font-size: 15px;
+  margin: 14px 0 8px;
+}
+
+.summary .chip.batch-ok {
+  background: #e6f7ec;
+  color: #1e7e34;
+  font-weight: 600;
+}
+
+.summary .chip.batch-gap {
+  background: #fde8e8;
+  color: #c92a2a;
+  font-weight: 600;
+}
+
+#batchSigTable tfoot td,
+#batchLotTable tfoot td {
+  background: #f4f6fa;
+  font-weight: 600;
+  position: sticky;
+  bottom: 0;
+}
+
+#batchSigTable tr.batch-short td {
+  background: #fff5f5;
+  color: #a61b1b;
+}
+
 /* ------------------------------ 采购报价组合 ------------------------------ */
 
 .summary .chip.quote-ok {

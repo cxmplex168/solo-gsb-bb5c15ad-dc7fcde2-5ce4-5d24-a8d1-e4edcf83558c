@@ -15,10 +15,11 @@
 - 可选 **双面生产标记**：启用适配检查后可勾选，为每张纸正、背面生成**裁切线**（四个成品页外角各两段）、**折线标**（中线上下两端）与**套准十字**（左右出血框外侧，每侧按「居中 → 1/4 → 3/4」固定候选位置顺序尝试）；线段只有**完整落在纸内、避开两侧出血框且不与同面已放置标记相交**才落位，无可用位置则**省略并逐候选返回原因**；背面标记由正面按长边 / 短边翻转做**同一物理位置的坐标变换**，保证正背套准，爬移变化后同步重算；
 - 可选 **试印核验**：对照实物纸张录入 1～12 条观察（帖 / 张 / 正背面 / 左右页位 / 看到的页码或空白 / 内容朝向），服务端用同一输入重算「左/右装订 × 长/短边翻转」四种设置逐条比对，仅唯一零差异组合判定验证通过，并列最优时返回无法判定及并列组合；**无法判定时自动从尚未观察的页位计算「下一处观察建议」**（含定位与各候选预期值）；
 - 可选 **印刷备料**：填写成品份数、每帖开机损耗张数、过程损耗率与每包张数，按拼版结果**各帖实际张数**逐帖计算净用纸，并以 `需领纸 = ceil((净用纸 + 开机损耗) / (1 − 过程损耗率))` **逐帖向上取整**，再汇总后按整包向上采购（**禁止先合并各帖再计算损耗**）；页面逐帖展示净用纸、开机损耗、过程损耗与需领纸及整包采购汇总，导出 JSON 的 `materialPrep` 段附带相同数据；
+- 可选 **库存批次领纸**：启用印刷备料后，录入 1～12 个库存批次（批号 / 可用张数 / 允许使用的帖号），各帖需求自动取自备料的**逐帖需领纸**；批次可拆给多帖、同帖可跨批次，每批领用**不超库存**且只能分给允许的帖，系统按**总缺口最小**（最大流）分配，同等缺口下**更专用的批次优先领用**；页面逐帖列出批次领用与缺口、逐批列出剩余张数，重复批号 / 无效帖号 / 未启用备料时启用均报明确错误，导出 JSON 的 `batchDraw` 段附带相同数据；
 - 可选 **采购报价组合**：录入多条本地报价（供应商 / 每包张数 / 每包价格 / 最少 / 最多可购包数），需求张数**默认接入印刷备料的整包采购张数**，也允许**手工填写**；在满足需求与各报价边界的整数包组合中按 **「总价最低 → 超购张数最少 → 供应商数量最少 → 录入顺序（更早录入优先装满）」** 确定唯一方案，价格一律按**分（整数）精确计算**（不使用浮点比较）；页面逐报价展示采购量 / 金额 / 余量，无可行组合时给出**具体缺口张数**，导出 JSON 的 `purchaseQuotes` 段附带相同数据；
 - 可选 **双版本共版印刷清单**：输入 A、B 两版成品份数及 B 版相对 A 版改动的真实页码（支持单页与区间，自动去重并校验页码范围），沿用当前分帖、补白、装订与翻转后的页位**逐张逐面**判定——无改动页的面**共用一块印版**（印次 = A + B），含改动页的面**拆成 A、B 两块印版**各按自身份数印刷，同张纸正背面独立判定；页面逐面展示帖 / 张 / 面 / 页码 / 印版归属与印次汇总，导出 JSON 的 `dualVersion` 段附带相同清单；
 - 画布**逐张显示**纸面、页码、空白页位与翻转方向示意；
-- 一键**导出拼版清单 JSON**（包含适配检查、试印核验、印刷备料、采购报价组合与双版本共版印刷清单结果）。
+- 一键**导出拼版清单 JSON**（包含适配检查、试印核验、印刷备料、库存批次领纸、采购报价组合与双版本共版印刷清单结果）。
 
 ## 快速开始（Docker Compose 一键启动）
 
@@ -303,6 +304,65 @@ npm test           # 运行拼版逻辑单元测试
 
 前端结果区「**印刷备料**」面板逐帖列出每帖实际张数、净用纸、开机损耗、过程损耗、损耗合计与需领纸，底部汇总行给出合计，顶部 chips 给出需领纸合计与整包采购（包数 / 张数 / 包余）；导出的拼版清单 JSON 含同一 `materialPrep` 段。备料只读取拼版结果中各帖的实际张数，固定 / 均衡 / 章节优先分帖均可启用，不影响页码拼版本身。
 
+### 库存批次领纸（inventory batch draw）
+
+勾选表单中的「库存批次领纸」并录入 1～12 个库存批次后启用（API 传 `batchDraw: { batches: [...] }`）；缺省 / 不传 / `null` / `false` / `{ "enabled": false }` 时**不启用，响应中不含任何批次领纸字段，与旧版本完全一致**。**启用本模块必须同时启用印刷备料**（勾选时表单会自动联动勾上备料）——各帖需求直接取自备料的**逐帖需领纸** `materialPrep.signatures[].requiredSheets`；未启用备料时启用本模块返回 400 明确错误。
+
+每个批次录入三项：
+
+- **批号** `batchNo`：非空字符串（≤ 50 字符），同次请求内**不可重复**（同一批次的库存请合并为一条录入）；
+- **可用张数** `availableSheets`：≥ 1 的整数，即该批库存；
+- **允许使用的帖号** `signatures`：非空数组（`1 ~ 帖数` 的整数，不可重复），或字符串 `"all"` 表示**全部帖通用**（表单中留空即上送 `"all"`）。
+
+分配规则：
+
+- 批次**可拆给多帖**、同帖**可跨批次**领用；
+- 每批领用合计**不得超过其可用张数**，且**只能分给允许使用的帖**；
+- 优化目标为**总缺口最小**（各帖缺口合计最小）：以「源 → 批次（容量 = 可用张数）→ 帖（仅允许的帖有边）→ 汇（容量 = 需求张数）」的网络求**最大流**，总缺口 = 需求合计 − 最大流；
+- 同等缺口下，**允许帖数更少（更专用）的批次优先领用**，并列时录入顺序在前者优先——尽量把通用批的库存留给后面的帖；仅在能进一步减小总缺口时才通过增广路径改道，结果唯一确定。
+
+> 示例：两帖各需 10 张，通用批（`"all"`）与仅供第 1 帖的专用批各有 10 张——专用批优先分给第 1 帖、通用批留给第 2 帖，**两帖均无缺口**（若先动用通用批，第 2 帖将缺 10 张而专用批库存闲置）。
+
+**重复批号**、**无效帖号**（非整数 / 越界 `1 ~ 帖数` / 同批重复 / 空数组）与**未启用备料时启用本模块**都会返回 400 明确错误。
+
+顶层 `batchDraw` 段示例（上例）：
+
+```json
+{
+  "enabled": true,
+  "demandSource": "materialPrep",
+  "rule": "总缺口最小（最大流）：批次可拆给多帖、同帖可跨批次；每批领用不超过可用张数且只能分给允许的帖；同等缺口下允许帖数更少（更专用）的批次优先领用，并列时录入顺序在前者优先",
+  "batches": [
+    { "index": 1, "batchNo": "通用批", "availableSheets": 10, "allowedSignatures": [1, 2],
+      "drawnSheets": 10, "remainingSheets": 0,
+      "allocations": [ { "signature": 2, "sheets": 10 } ] },
+    { "index": 2, "batchNo": "专用批", "availableSheets": 10, "allowedSignatures": [1],
+      "drawnSheets": 10, "remainingSheets": 0,
+      "allocations": [ { "signature": 1, "sheets": 10 } ] }
+  ],
+  "signatures": [
+    { "signature": 1, "requiredSheets": 10, "drawnSheets": 10, "shortageSheets": 0,
+      "draws": [ { "batch": 2, "batchNo": "专用批", "sheets": 10 } ] },
+    { "signature": 2, "requiredSheets": 10, "drawnSheets": 10, "shortageSheets": 0,
+      "draws": [ { "batch": 1, "batchNo": "通用批", "sheets": 10 } ] }
+  ],
+  "totals": {
+    "batchCount": 2,
+    "signatureCount": 2,
+    "availableSheets": 20,
+    "requiredSheets": 20,
+    "drawnSheets": 20,
+    "shortageSheets": 0,
+    "remainingSheets": 0,
+    "feasible": true
+  }
+}
+```
+
+库存不足时 HTTP 仍返回 200，`batchDraw.totals.feasible` 为 `false`，`shortageSheets` 给出**最小总缺口**，逐帖 `shortageSheets` 列出各帖缺口、逐批 `remainingSheets` 列出剩余张数（库存全部分完时各批剩余为 0）。
+
+前端结果区「**库存批次领纸**」面板顶部 chips 给出批次数、库存 / 需求 / 领用 / 缺口 / 剩余合计；「**逐帖领用与缺口**」表列出每帖需求、批次领用明细（批号 × 张数）与缺口（有缺口的帖行标红）；「**逐批领用与剩余**」表列出每批可用张数、允许帖号、领用明细（帖 → 张数）与剩余张数；库存不足时以红色横幅显示总缺口。导出的拼版清单 JSON 含同一 `batchDraw` 段。
+
 ### 采购报价组合（purchase quote combination）
 
 勾选表单中的「采购报价组合」并录入 1～8 条本地报价后启用（API 传 `purchaseQuotes: { demandSheets?, quotes: [...] }`）；缺省 / 不传 / `null` / `false` / `{ "enabled": false }` 时**不启用，响应中不含任何报价组合字段，与旧版本完全一致**。
@@ -457,6 +517,12 @@ npm test           # 运行拼版逻辑单元测试
     "processWasteRate": 0.03,
     "sheetsPerPack": 500
   },
+  "batchDraw": {
+    "batches": [
+      { "batchNo": "P2026-001", "availableSheets": 3000, "signatures": "all" },
+      { "batchNo": "P2026-002", "availableSheets": 1500, "signatures": [1] }
+    ]
+  },
   "purchaseQuotes": {
     "demandSheets": 4500,
     "quotes": [
@@ -497,6 +563,10 @@ npm test           # 运行拼版逻辑单元测试
   - `processWasteRate`：过程损耗率，0 ≤ r < 1 的小数（`0.03` = 3%）；
   - `sheetsPerPack`：每包张数，≥ 1 的整数。
   - 逐帖 `ceil((净用纸 + 开机损耗) / (1 − 过程损耗率))` 后汇总，再按每包向上取整采购；参数非对象、份数 / 包数非正整数、开机损耗为负、损耗率越界（< 0 或 ≥ 1）均返回 400 明确错误。
+- `batchDraw`：**可选**，库存批次领纸参数对象（缺省 / `null` / `false` 不启用，响应不含批次领纸字段，与旧版本完全一致）。**启用时必须同时启用 `materialPrep`**（各帖需求取自备料逐帖需领纸 `requiredSheets`），否则返回 400。字段：
+  - `batches`：1～12 个批次，每个含 `batchNo`（批号，非空、不重复，≤ 50 字符）/ `availableSheets`（可用张数，≥ 1 整数）/ `signatures`（允许帖号：`1 ~ 帖数` 的非空整数数组且不重复，或 `"all"` 表示全部帖通用）；
+  - 批次可拆给多帖、同帖可跨批次；每批领用不超可用张数且只能分给允许的帖；按最大流求**总缺口最小**的分配，同等缺口下更专用（允许帖数更少）的批次优先领用、并列时录入顺序在前者优先；
+  - 批次数非 1～12、批号为空或重复、可用张数非正整数、帖号非整数 / 越界 / 重复 / 空数组等均返回 400 明确错误。
 - `purchaseQuotes`：**可选**，采购报价组合参数对象（缺省 / `null` / `false` 不启用，响应不含报价组合字段，与旧版本完全一致）。字段：
   - `demandSheets`：手工需求张数，≥ 1 的整数，**可缺省**——缺省时自动取同次请求 `materialPrep` 汇总后的整包采购张数（`totals.purchaseSheets`）；未启用备料又未填需求张数返回 400；
   - `quotes`：1～8 条报价，每条含 `supplier`（非空、不重复，≤ 50 字符）/ `sheetsPerPack`（≥ 1 整数）/ `pricePerPackCents`（每包价格，**分为单位的非负整数**，如 `1234` = 12.34 元）/ `minPacks`（≥ 0 整数）/ `maxPacks`（≥ 1 且 ≥ `minPacks` 的整数）；
@@ -624,11 +694,13 @@ npm test           # 运行拼版逻辑单元测试
 
 启用印刷备料时，顶层增加 `materialPrep`（结构与示例见上文「印刷备料」一节）：逐帖 `signatures[]` 给出 `signature` / `actualSheetCount` / `copies` / `netSheets`（净用纸）/ `makereadySheets`（开机损耗）/ `processWaste`（过程损耗，含逐帖取整余量）/ `totalWaste`（损耗合计）/ `requiredSheets`（需领纸）；`totals` 给出逐帖汇总后的净用纸 / 各类损耗 / 需领纸合计，以及整包采购 `purchasePacks`（采购包数）/ `sheetsPerPack` / `purchaseSheets`（采购张数）/ `packRemainder`（包余）。未启用时响应中不含 `materialPrep` 字段。
 
+启用库存批次领纸时，顶层增加 `batchDraw`（结构与示例见上文「库存批次领纸」一节）：`batches[]` 逐批给出 `batchNo` / `availableSheets` / `allowedSignatures`（`"all"` 已展开为全部帖号）/ `drawnSheets`（领用合计）/ `remainingSheets`（剩余张数）/ `allocations[]`（分给各帖的张数）；`signatures[]` 逐帖给出 `requiredSheets`（需求，取自备料）/ `draws[]`（批次领用明细）/ `drawnSheets` / `shortageSheets`（缺口）；`totals` 汇总批次数、帖数、库存 / 需求 / 领用 / 缺口 / 剩余合计与 `feasible`（是否无缺口）。未启用时响应中不含 `batchDraw` 字段。
+
 启用采购报价组合时，顶层增加 `purchaseQuotes`（结构与示例见上文「采购报价组合」一节）：`demandSheets` / `demandSource`（`manual` 手工 / `materialPrep` 接入备料整包采购张数）/ 回显的 `quotes[]`；可行时 `feasible: true`，逐报价 `rows[]` 给出 `packs`（采购包数）/ `sheets`（采购张数）/ `amountCents`（金额，分）/ `remainingPacks` / `remainingSheets`（可购余量），`totals` 给出 `totalPacks` / `totalSheets` / `overPurchaseSheets`（超购张数）/ `totalCostCents`（总价，分）/ `supplierCount` / `suppliers`；无可行组合时 `feasible: false`，给出 `gapSheets`（缺口张数）/ `reason` / `maxPurchasableSheets`，`rows[]` 按各报价上限给出尽最大可购量（余量为 0）。未启用时响应中不含 `purchaseQuotes` 字段。
 
 启用双版本共版印刷时，顶层增加 `dualVersion`（结构与示例见上文「双版本共版印刷」一节）：回显 `copiesA` / `copiesB` 与去重升序后的 `changedPages`；`rows[]` 逐面给出 `signature` / `sheet` / `side` / `leftPage` / `rightPage`（空白页位为 `null`）/ `changedPages`（本面含有的改动页）/ `shared`（是否共版）/ `plates[]`（共版为 1 块 `shared` 印版、印次 = A + B；拆版为 `A`、`B` 两块印版、各按自身份数印刷）；`totals` 汇总 `sideCount`（面数）/ `sharedSideCount` / `splitSideCount` / `sharedPlateCount` / `splitPlateCount` / `plateCount`（印版总数）/ `savedPlateCount`（较全部拆版节省的印版数）/ `impressions`（总印次）。未启用时响应中不含 `dualVersion` 字段。
 
-参数非法时返回 `400` 与错误信息（含纸张厚度 / 最大补偿量为负，尺寸参数为负、非数字或只提供部分尺寸，`balancedSplit` / `chapterSplit` 非布尔值，两种分帖模式同时启用，章节起始页非数组 / 为空 / 非整数 / 重复 / 未递增 / 越界，观察记录非数组 / 超过 12 条 / 索引越界 / 重复观察 / 字段非法，`productionMarks` 非布尔值、未启用适配检查就开启生产标记、`markSizeMm` 非正数或超过 100mm，备料参数 `materialPrep` 非对象、成品份数 / 每包张数非正整数、开机损耗为负、过程损耗率不在 [0, 1)，采购报价 `purchaseQuotes` 非对象、未启用备料又未给需求张数、报价非数组 / 为空 / 超过 8 条、供应商为空或重复、每包张数非正整数、每包价格（分）为负或非整数、包数边界非法（< 0 / < 1 / 最多少于最少），以及双版本共版 `dualVersion` 非对象、A / B 版份数非正整数、改动页码缺失 / 为空 / 非整数 / 越界（1 ~ totalPages）/ 区间起点大于终点 / 条目无法解析等情况）。另提供 `GET /api/health` 健康检查。
+参数非法时返回 `400` 与错误信息（含纸张厚度 / 最大补偿量为负，尺寸参数为负、非数字或只提供部分尺寸，`balancedSplit` / `chapterSplit` 非布尔值，两种分帖模式同时启用，章节起始页非数组 / 为空 / 非整数 / 重复 / 未递增 / 越界，观察记录非数组 / 超过 12 条 / 索引越界 / 重复观察 / 字段非法，`productionMarks` 非布尔值、未启用适配检查就开启生产标记、`markSizeMm` 非正数或超过 100mm，备料参数 `materialPrep` 非对象、成品份数 / 每包张数非正整数、开机损耗为负、过程损耗率不在 [0, 1)，库存批次领纸 `batchDraw` 非对象、未启用备料就启用批次领纸、批次非数组 / 为空 / 超过 12 个、批号为空或重复、可用张数非正整数、允许帖号非整数 / 越界（1 ~ 帖数）/ 重复 / 空数组，采购报价 `purchaseQuotes` 非对象、未启用备料又未给需求张数、报价非数组 / 为空 / 超过 8 条、供应商为空或重复、每包张数非正整数、每包价格（分）为负或非整数、包数边界非法（< 0 / < 1 / 最多少于最少），以及双版本共版 `dualVersion` 非对象、A / B 版份数非正整数、改动页码缺失 / 为空 / 非整数 / 越界（1 ~ totalPages）/ 区间起点大于终点 / 条目无法解析等情况）。另提供 `GET /api/health` 健康检查。
 
 调用示例（生成带双面生产标记的拼版清单，460×330 纸张放 210×297 成品页，短边翻转）：
 
@@ -667,6 +739,31 @@ curl -s -X POST http://localhost:8080/api/impose \
 # => { "signatureCount": 2, "netSheets": 4000, "makereadySheets": 20, "processWaste": 126,
 #      "totalWaste": 146, "requiredSheets": 4146, "purchasePacks": 9,
 #      "sheetsPerPack": 500, "purchaseSheets": 4500, "packRemainder": 354 }
+```
+
+调用示例（启用库存批次领纸：16 页、2 帖各需 10 张，通用批与仅供第 1 帖的专用批各 10 张，两帖均无缺口）：
+
+```bash
+curl -s -X POST http://localhost:8080/api/impose \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "totalPages": 16,
+    "sheetsPerSignature": 2,
+    "binding": "left",
+    "flip": "short",
+    "materialPrep": { "copies": 5, "makereadySheets": 0, "processWasteRate": 0, "sheetsPerPack": 100 },
+    "batchDraw": {
+      "batches": [
+        { "batchNo": "通用批", "availableSheets": 10, "signatures": "all" },
+        { "batchNo": "专用批", "availableSheets": 10, "signatures": [1] }
+      ]
+    }
+  }' | jq '.batchDraw | { signatures: [.signatures[] | { signature, shortageSheets }], batches: [.batches[] | { batchNo, remainingSheets, allocations }], totals }'
+# => { "signatures": [ { "signature": 1, "shortageSheets": 0 }, { "signature": 2, "shortageSheets": 0 } ],
+#      "batches": [ { "batchNo": "通用批", "remainingSheets": 0, "allocations": [ { "signature": 2, "sheets": 10 } ] },
+#                   { "batchNo": "专用批", "remainingSheets": 0, "allocations": [ { "signature": 1, "sheets": 10 } ] } ],
+#      "totals": { "batchCount": 2, "signatureCount": 2, "availableSheets": 20, "requiredSheets": 20,
+#                  "drawnSheets": 20, "shortageSheets": 0, "remainingSheets": 0, "feasible": true } }
 ```
 
 调用示例（在同一请求中启用采购报价组合，需求张数缺省自动接入备料整包采购张数 4500）：
@@ -721,9 +818,10 @@ curl -s -X POST http://localhost:8080/api/impose \
 ├── src/productionMarks.js # 双面生产标记（裁切线 / 折线标 / 套准十字候选落位、正背坐标变换、省略原因）
 ├── src/verification.js    # 试印核验（观察校验、四种装订×翻转重算比对、候选排序与结论）
 ├── src/materialPrep.js    # 印刷备料（逐帖净用纸 / 开机损耗 / 过程损耗 / 需领纸 ceil、整包采购汇总）
+├── src/batchDraw.js       # 库存批次领纸（批次录入校验、最大流总缺口最小分配、逐帖缺口与逐批剩余）
 ├── src/purchaseQuote.js   # 采购报价组合（分整数计价、边界约束、四级排序唯一方案、缺口、有界 DP 求解）
 ├── src/dualVersion.js     # 双版本共版印刷（改动页码解析校验、逐张逐面印版归属判定、印版 / 印次汇总）
-├── public/                # 前端（原生 Canvas 逐张绘制、原始/补偿页位叠加、适配标记、生产标记、试印核验面板、印刷备料面板、采购报价组合面板、双版本共版面板、JSON 导出）
+├── public/                # 前端（原生 Canvas 逐张绘制、原始/补偿页位叠加、适配标记、生产标记、试印核验面板、印刷备料面板、库存批次领纸面板、采购报价组合面板、双版本共版面板、JSON 导出）
 │   ├── index.html
 │   ├── app.js
 │   └── style.css
@@ -733,6 +831,7 @@ curl -s -X POST http://localhost:8080/api/impose \
 ├── test/chapterSplit.test.js
 ├── test/verification.test.js
 ├── test/materialPrep.test.js
+├── test/batchDraw.test.js
 ├── test/purchaseQuote.test.js
 ├── test/dualVersion.test.js
 ├── test/api.test.js
